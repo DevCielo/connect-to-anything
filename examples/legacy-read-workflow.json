@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "name": "Read legacy record",
+  "origin": "https://legacy.example.com",
+  "inputs": {
+    "record_id": "string"
+  },
+  "steps": [
+    {
+      "id": "read_record",
+      "name": "Read one record",
+      "request": {
+        "method": "GET",
+        "path": "api/records/{{inputs.record_id}}",
+        "headers": {
+          "accept": "application/json"
+        }
+      },
+      "assert": {
+        "status": [200]
+      },
+      "extract": {
+        "record_name": "data.name"
+      }
+    }
+  ]
+}
