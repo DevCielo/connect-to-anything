@@ -1,28 +1,44 @@
 # connect-to-anything
 
+![A red braided cable joins a vintage serial connector to a modern USB-C plug](docs/assets/readme-banner.jpg)
+
 An open-source, self-hosted toolkit for connecting modern products and agents to APIs and legacy web software. It provides hosted authorization, encrypted credential storage, sanitized HAR import, declarative request workflows, constrained execution, drift detection, and run evidence.
+
+[Quick start](#run-it) · [Integration examples](#what-you-can-connect) · [What gets blocked](#what-gets-blocked) · [API reference](#api) · [Architecture](docs/architecture.md)
 
 > [!WARNING]
 > **Use this software entirely at your own risk.** It is experimental, comes with no warranty, and is not a managed security or compliance service. You are responsible for obtaining permission, respecting software terms and access policies, protecting credentials and personal data, reviewing every imported workflow, and testing all read/write operations. Never use it to bypass MFA, anti-bot controls, access restrictions, or another person's authorization.
 
 Read the plain-language [disclaimer](DISCLAIMER.md) and [security policy](SECURITY.md) before running it.
 
-## Why this exists
+## How it works
 
-Many useful systems have no public API, an incomplete API, or a web portal built long before agent tooling. This project gives developers a transparent, inspectable way to turn network requests they are already authorized to make into a versioned workflow:
+1. **Connect.** Your backend requests a short-lived link. The user opens the hosted page to authorize access or enter credentials.
+2. **Call.** Your backend uses the connection ID to make a request to the configured service. Credentials are stored encrypted and applied server-side.
+3. **Repeat.** For multi-step tasks, publish a reviewed workflow, pass in inputs, and inspect the recorded result. A status mismatch stops the run.
 
-1. Your backend creates a short-lived connect session for one tenant, user, and provider.
-2. The user authorizes with OAuth, an API key, or a manually supplied legacy session cookie.
-3. Tokens are encrypted and kept server-side.
-4. A developer exports a narrowly scoped HAR from browser developer tools and imports it; secrets are removed and only one origin is accepted.
-5. The generated workflow is reviewed, parameterized and versioned.
-6. The runtime executes each request on the connection's pinned origin, records redacted results, and stops if a status assertion drifts.
+## What you can connect
 
-Credentials never reach an agent or browser client after connection. This is deliberately a workflow engine, not an access-control bypass or automatic “repair anything” promise. See [docs/architecture.md](docs/architecture.md) and [docs/safe-capture.md](docs/safe-capture.md).
+Four connection types ship with the repo. The generic HTTP option can cover many systems that accept a key in a request header.
+
+| Connection | Example use | What you need |
+| --- | --- | --- |
+| GitHub OAuth | Look up the signed-in user's profile | A GitHub OAuth app |
+| Slack OAuth | Look up workspace users | A Slack OAuth app and the required scopes |
+| HTTP API key | Read a support ticket, check an order, or fetch an inventory item | An HTTPS API, its base URL, and an authorized header-based key |
+| Legacy web session | Read a record from an internal portal you have permission to integrate | A manually supplied session cookie and compatible HTTP endpoints |
+
+The same HTTP setup can fit CRM records, fulfillment status, billing exports, help desk queues, and internal admin tools. Each integration depends on the service's authentication, API shape, and permissions. For an example of a reviewed, read-only workflow, see [legacy-read-workflow.json](examples/legacy-read-workflow.json).
+
+### When a service has no public API
+
+A portal may still have HTTP requests that your organization is authorized to integrate with. A narrowly scoped HAR can become a draft workflow for review. Check that the service permits this use, review the draft before publishing, and test it against a non-production account where available. For browser-only interactions or services that require steps outside the supported HTTP workflow, use a supported integration path. See the [safe capture guide](docs/safe-capture.md).
 
 ## Run it
 
-Requires Node 22.5+ (the built-in SQLite module is currently marked experimental by Node).
+### 1. Start the server
+
+Run these commands from the cloned repo. You'll need Node 22.5 or later. The server uses Node's built-in SQLite module, which may emit an experimental warning.
 
 ```bash
 cp .env.example .env
@@ -31,7 +47,24 @@ export API_KEYS_JSON='{"replace-this-server-secret":"tenant-123"}'
 node --env-file=.env src/server.js
 ```
 
-Create a GitHub OAuth App whose callback is `http://localhost:4242/v1/oauth/callback/github`, add its client ID/secret to `.env`, then create a connect session from your **backend**:
+### 2. Check that it started
+
+In another terminal, check the health endpoint. It returns `{"ok":true}` and requires no provider account.
+
+```bash
+curl -fsS http://localhost:4242/healthz
+```
+
+To see which connection types are available, call the provider list with the server key set in step 1.
+
+```bash
+curl -fsS http://localhost:4242/v1/providers \
+  -H 'Authorization: Bearer replace-this-server-secret'
+```
+
+### 3. Make your first GitHub connection
+
+Create a GitHub OAuth App whose callback is `http://localhost:4242/v1/oauth/callback/github`, add its client ID and secret to `.env`, restart the server with the same encryption key, and create a connect session from your **backend**:
 
 ```bash
 curl -s http://localhost:4242/v1/connect-sessions \
@@ -40,7 +73,9 @@ curl -s http://localhost:4242/v1/connect-sessions \
   -d '{"external_user_id":"user-42","provider":"github","return_url":"http://localhost:3000/integrations/done"}'
 ```
 
-Open the returned `connect_url`. After authorization, list and use connections:
+Open the returned `connect_url` in your browser and approve the connection. The example return URL is where your own application would receive the browser after authorization. You can confirm the connection from the terminal even if you have no app running on port 3000.
+
+List the user's connections, copy the returned ID into `CONNECTION_ID`, then fetch the signed-in GitHub profile.
 
 ```bash
 curl -s 'http://localhost:4242/v1/connections?external_user_id=user-42' \
@@ -68,6 +103,23 @@ curl -s http://localhost:4242/v1/connections/CONNECTION_ID/proxy \
 | `GET /v1/runs/:id` | Read redacted run evidence and drift/failure state |
 
 Built-ins are GitHub, Slack, generic HTTP API-key auth, and an explicitly manual legacy web session. Add an OAuth provider in `src/providers.js`; its authorization URL, token URL, API origin, least-privilege default scopes, credential environment variables, and PKCE support are explicit data. Never export or import a HAR containing credentials without reviewing and sanitizing it first.
+
+## What gets blocked
+
+| Attempt or condition | What happens |
+| --- | --- |
+| Missing or invalid server API key | The backend API rejects the request. |
+| Looking up a different tenant's connection or run | The resource lookup is scoped to the caller's tenant. |
+| Reusing an expired or consumed connect link or OAuth state | The connection attempt is rejected. |
+| Sending a request outside the connection's origin or base path | The runtime rejects the destination. |
+| An upstream redirect | The runtime does not follow it automatically. |
+| A detected private, loopback, or link-local target for a user-supplied API base URL | The outbound URL checks reject it, with local development exceptions. |
+| Importing a HAR that spans more than one origin or contains more than 50 requests | The import is rejected. |
+| Importing known sensitive headers such as `Authorization` or `Cookie` | The importer strips them from the draft. |
+| Running a workflow against a connection on a different origin | The run request is rejected. |
+| Receiving a status outside a workflow step's expected statuses | The run stops and records the mismatch as drift. |
+
+MFA, access controls, and provider permissions still apply. Review the [threat model](docs/threat-model.md) for the limits of these checks.
 
 ## Security posture
 
